@@ -125,11 +125,11 @@ class BinanceTelegramBot:
                 'url': 'https://api.coingecko.com/api/v3/coins/bitcoin',
                 'params': {'localization': 'false', 'tickers': 'false', 'market_data': 'true', 'community_data': 'false', 'developer_data': 'false'},
                 'parse': lambda data: {
-                    'price_change': data['market_data']['price_change_24h']['usd'],
-                    'price_change_percent': data['market_data']['price_change_percentage_24h'],
-                    'high': data['market_data']['high_24h']['usd'],
-                    'low': data['market_data']['low_24h']['usd'],
-                    'volume': data['market_data']['total_volume']['usd']
+                    'price_change': data['market_data']['price_change_24h']['usd'] if isinstance(data['market_data']['price_change_24h'], dict) else data['market_data']['price_change_24h'],
+                    'price_change_percent': data['market_data']['price_change_percentage_24h'] if data['market_data']['price_change_percentage_24h'] else 0,
+                    'high': data['market_data']['high_24h']['usd'] if isinstance(data['market_data']['high_24h'], dict) else data['market_data']['high_24h'],
+                    'low': data['market_data']['low_24h']['usd'] if isinstance(data['market_data']['low_24h'], dict) else data['market_data']['low_24h'],
+                    'volume': data['market_data']['total_volume']['usd'] if isinstance(data['market_data']['total_volume'], dict) else data['market_data']['total_volume']
                 }
             },
             {
@@ -145,15 +145,27 @@ class BinanceTelegramBot:
                 }
             },
             {
-                'name': 'Binance (Original)',
-                'url': f"{self.binance_api_url}/ticker/24hr",
-                'params': {'symbol': 'BTCUSDT'},
+                'name': 'CryptoCompare',
+                'url': 'https://min-api.cryptocompare.com/data/pricemultifull',
+                'params': {'fsyms': 'BTC', 'tsyms': 'USD'},
                 'parse': lambda data: {
-                    'price_change': float(data['priceChange']),
-                    'price_change_percent': float(data['priceChangePercent']),
-                    'high': float(data['highPrice']),
-                    'low': float(data['lowPrice']),
-                    'volume': float(data['volume'])
+                    'price_change': float(data['RAW']['BTC']['USD']['CHANGE24HOUR']),
+                    'price_change_percent': float(data['RAW']['BTC']['USD']['CHANGEPCT24HOUR']),
+                    'high': float(data['RAW']['BTC']['USD']['HIGH24HOUR']),
+                    'low': float(data['RAW']['BTC']['USD']['LOW24HOUR']),
+                    'volume': float(data['RAW']['BTC']['USD']['VOLUME24HOUR'])
+                }
+            },
+            {
+                'name': 'Alternative API',
+                'url': 'https://api.coinbase.com/v2/exchange-rates',
+                'params': {'currency': 'BTC'},
+                'parse': lambda data: {
+                    'price_change': 0,  # This API doesn't provide 24h change
+                    'price_change_percent': 0,
+                    'high': float(data['data']['rates']['USD']),
+                    'low': float(data['data']['rates']['USD']),
+                    'volume': 0
                 }
             }
         ]
@@ -165,13 +177,16 @@ class BinanceTelegramBot:
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                     'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
                 }
                 
                 response = requests.get(
                     source['url'], 
                     params=source['params'],
                     headers=headers,
-                    timeout=10
+                    timeout=15
                 )
                 response.raise_for_status()
                 
@@ -225,16 +240,23 @@ class BinanceTelegramBot:
         """Format price information for Telegram"""
         change_emoji = "📈" if stats['price_change'] > 0 else "📉" if stats['price_change'] < 0 else "➖"
         
+        # Handle cases where stats might be 0 or None
+        price_change = stats.get('price_change', 0)
+        price_change_percent = stats.get('price_change_percent', 0)
+        high_price = stats.get('high', price)
+        low_price = stats.get('low', price)
+        volume = stats.get('volume', 0)
+        
         message = f"""
 🚀 <b>BTC Price Alert</b>
 
 💰 <b>Current Price:</b> ${price:,.2f}
-{change_emoji} <b>24h Change:</b> {stats['price_change_percent']:.2f}% (${stats['price_change']:+,.2f})
+{change_emoji} <b>24h Change:</b> {price_change_percent:.2f}% (${price_change:+,.2f})
 
 📊 <b>24h Stats:</b>
-• <b>High:</b> ${stats['high']:,.2f}
-• <b>Low:</b> ${stats['low']:,.2f}
-• <b>Volume:</b> ${stats['volume']:,.0f}
+• <b>High:</b> ${high_price:,.2f}
+• <b>Low:</b> ${low_price:,.2f}
+• <b>Volume:</b> ${volume:,.0f}
 
 📡 <b>Source:</b> {source_name}
 ⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
@@ -277,15 +299,6 @@ class BinanceTelegramBot:
             
             # Get 24h statistics
             stats = self.get_24h_stats()
-            if stats is None:
-                logger.warning("Failed to fetch 24h stats, using fallback")
-                stats = {
-                    'price_change': 0,
-                    'price_change_percent': 0,
-                    'high': current_price,
-                    'low': current_price,
-                    'volume': 0
-                }
             
             # Determine which source was used (for display purposes)
             source_used = "Multi-Source API"
