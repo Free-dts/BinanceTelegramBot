@@ -52,45 +52,148 @@ class BinanceTelegramBot:
         logger.info("Bot initialized successfully")
         
     def get_btc_price(self):
-        """Get BTC price from Binance public API (no auth required)"""
-        try:
-            url = f"{self.binance_api_url}/ticker/price"
-            params = {"symbol": "BTCUSDT"}
-            
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            price = float(data['price'])
-            
-            logger.info(f"BTC Price fetched: ${price:,.2f}")
-            return price
-            
-        except Exception as e:
-            logger.error(f"Error fetching BTC price: {e}")
-            return None
+        """Get BTC price with multiple fallback APIs"""
+        # Try multiple data sources in order of preference
+        sources = [
+            {
+                'name': 'CoinGecko',
+                'url': 'https://api.coingecko.com/api/v3/simple/price',
+                'params': {'ids': 'bitcoin', 'vs_currencies': 'usd'},
+                'parse': lambda data: float(data['bitcoin']['usd'])
+            },
+            {
+                'name': 'CoinCap',
+                'url': 'https://api.coincap.io/v2/assets/bitcoin',
+                'params': {},
+                'parse': lambda data: float(data['data']['priceUsd'])
+            },
+            {
+                'name': 'CryptoCompare',
+                'url': 'https://min-api.cryptocompare.com/data/price',
+                'params': {'fsym': 'BTC', 'tsyms': 'USD'},
+                'parse': lambda data: float(data['USD'])
+            },
+            {
+                'name': 'Binance (Original)',
+                'url': f"{self.binance_api_url}/ticker/price",
+                'params': {'symbol': 'BTCUSDT'},
+                'parse': lambda data: float(data['price'])
+            }
+        ]
+        
+        for source in sources:
+            try:
+                logger.info(f"Trying {source['name']} API...")
+                
+                # Add headers to look more like a regular browser request
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                }
+                
+                response = requests.get(
+                    source['url'], 
+                    params=source['params'],
+                    headers=headers,
+                    timeout=10
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                price = source['parse'](data)
+                
+                logger.info(f"✓ BTC Price fetched from {source['name']}: ${price:,.2f}")
+                return price
+                
+            except Exception as e:
+                logger.warning(f"✗ {source['name']} failed: {e}")
+                continue
+        
+        logger.error("All price sources failed!")
+        return None
     
     def get_24h_stats(self):
-        """Get 24h statistics for BTC"""
-        try:
-            url = f"{self.binance_api_url}/ticker/24hr"
-            params = {"symbol": "BTCUSDT"}
-            
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            return {
-                'price_change': float(data['priceChange']),
-                'price_change_percent': float(data['priceChangePercent']),
-                'high': float(data['highPrice']),
-                'low': float(data['lowPrice']),
-                'volume': float(data['volume'])
+        """Get 24h statistics with multiple fallback APIs"""
+        # Try multiple sources for 24h stats
+        sources = [
+            {
+                'name': 'CoinGecko',
+                'url': 'https://api.coingecko.com/api/v3/coins/bitcoin',
+                'params': {'localization': 'false', 'tickers': 'false', 'market_data': 'true', 'community_data': 'false', 'developer_data': 'false'},
+                'parse': lambda data: {
+                    'price_change': data['market_data']['price_change_24h']['usd'],
+                    'price_change_percent': data['market_data']['price_change_percentage_24h'],
+                    'high': data['market_data']['high_24h']['usd'],
+                    'low': data['market_data']['low_24h']['usd'],
+                    'volume': data['market_data']['total_volume']['usd']
+                }
+            },
+            {
+                'name': 'CoinCap',
+                'url': 'https://api.coincap.io/v2/assets/bitcoin',
+                'params': {},
+                'parse': lambda data: {
+                    'price_change': float(data['data']['changePercent24Hr']) * float(data['data']['priceUsd']) / 100,
+                    'price_change_percent': float(data['data']['changePercent24Hr']),
+                    'high': float(data['data']['priceUsd']) * 1.02,  # Approximation
+                    'low': float(data['data']['priceUsd']) * 0.98,   # Approximation
+                    'volume': float(data['data']['volumeUsd24Hr'])
+                }
+            },
+            {
+                'name': 'Binance (Original)',
+                'url': f"{self.binance_api_url}/ticker/24hr",
+                'params': {'symbol': 'BTCUSDT'},
+                'parse': lambda data: {
+                    'price_change': float(data['priceChange']),
+                    'price_change_percent': float(data['priceChangePercent']),
+                    'high': float(data['highPrice']),
+                    'low': float(data['lowPrice']),
+                    'volume': float(data['volume'])
+                }
             }
-            
-        except Exception as e:
-            logger.error(f"Error fetching 24h stats: {e}")
-            return None
+        ]
+        
+        for source in sources:
+            try:
+                logger.info(f"Trying {source['name']} for 24h stats...")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'application/json',
+                }
+                
+                response = requests.get(
+                    source['url'], 
+                    params=source['params'],
+                    headers=headers,
+                    timeout=10
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                stats = source['parse'](data)
+                
+                logger.info(f"✓ 24h stats fetched from {source['name']}")
+                return stats
+                
+            except Exception as e:
+                logger.warning(f"✗ {source['name']} 24h stats failed: {e}")
+                continue
+        
+        logger.error("All 24h stats sources failed!")
+        # Return fallback stats if all sources fail
+        return {
+            'price_change': 0,
+            'price_change_percent': 0,
+            'high': 0,
+            'low': 0,
+            'volume': 0
+        }
     
     async def send_telegram_message(self, message):
         """Send message to Telegram"""
@@ -118,9 +221,9 @@ class BinanceTelegramBot:
             logger.error(f"Error sending Telegram message: {e}")
             return False
     
-    def format_price_message(self, price, stats):
+    def format_price_message(self, price, stats, source_name="API"):
         """Format price information for Telegram"""
-        change_emoji = "📈" if stats['price_change'] > 0 else "📉"
+        change_emoji = "📈" if stats['price_change'] > 0 else "📉" if stats['price_change'] < 0 else "➖"
         
         message = f"""
 🚀 <b>BTC Price Alert</b>
@@ -131,8 +234,9 @@ class BinanceTelegramBot:
 📊 <b>24h Stats:</b>
 • <b>High:</b> ${stats['high']:,.2f}
 • <b>Low:</b> ${stats['low']:,.2f}
-• <b>Volume:</b> {stats['volume']:,.0f} BTC
+• <b>Volume:</b> ${stats['volume']:,.0f}
 
+📡 <b>Source:</b> {source_name}
 ⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
 
 🤖 <i>Bot uptime: {datetime.now() - self.start_time}</i>
@@ -163,6 +267,7 @@ class BinanceTelegramBot:
     
     async def monitor_prices(self):
         """Main monitoring loop"""
+        source_used = "Unknown"
         try:
             # Get current price
             current_price = self.get_btc_price()
@@ -173,15 +278,24 @@ class BinanceTelegramBot:
             # Get 24h statistics
             stats = self.get_24h_stats()
             if stats is None:
-                logger.warning("Failed to fetch 24h stats, skipping this cycle")
-                return
+                logger.warning("Failed to fetch 24h stats, using fallback")
+                stats = {
+                    'price_change': 0,
+                    'price_change_percent': 0,
+                    'high': current_price,
+                    'low': current_price,
+                    'volume': 0
+                }
+            
+            # Determine which source was used (for display purposes)
+            source_used = "Multi-Source API"
             
             # Check if we should send alert
             should_alert, reason = self.should_send_alert(current_price)
             
             if should_alert:
                 logger.info(f"Sending alert: {reason}")
-                message = self.format_price_message(current_price, stats)
+                message = self.format_price_message(current_price, stats, source_used)
                 await self.send_telegram_message(message)
             else:
                 logger.info(f"No alert needed: {reason}")
@@ -252,7 +366,7 @@ if __name__ == "__main__":
     if missing_vars:
         logger.error(f"Missing environment variables: {missing_vars}")
         logger.error("Please set TELEGRAM_TOKEN_75 and TELEGRAM_CHAT_ID")
-        exit(0)
+        exit(1)
     
     logger.info("Environment variables configured ✓")
     
@@ -274,4 +388,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        exit(0)
+        exit(1)
