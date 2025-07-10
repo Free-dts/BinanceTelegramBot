@@ -21,7 +21,7 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "status": "running",
-        "message": "Binance Bot is alive!",
+        "message": "Multi-Currency Binance Bot is alive!",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -37,142 +37,95 @@ def stats():
         "uptime": "running"
     })
 
-class BinanceTelegramBot:
+class MultiCurrencyTelegramBot:
     def __init__(self):
         # Environment variables
         self.telegram_token = os.getenv('TELEGRAM_TOKEN_75')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.binance_api_url = "https://api.binance.com/api/v3"
         
-        # Bot state
-        self.last_price = None
+        # Supported cryptocurrencies with their API mappings
+        self.currencies = {
+            'BTC': {
+                'name': 'Bitcoin',
+                'symbol': 'BTC',
+                'coingecko_id': 'bitcoin',
+                'binance_symbol': 'BTCUSDT',
+                'emoji': '🟠',
+                'threshold': 1.0  # 1% change threshold
+            },
+            'TRB': {
+                'name': 'Tellor',
+                'symbol': 'TRB',
+                'coingecko_id': 'tellor',
+                'binance_symbol': 'TRBUSDT',
+                'emoji': '🔷',
+                'threshold': 2.0  # 2% change threshold for smaller coins
+            },
+            'ARB': {
+                'name': 'Arbitrum',
+                'symbol': 'ARB',
+                'coingecko_id': 'arbitrum',
+                'binance_symbol': 'ARBUSDT',
+                'emoji': '🔵',
+                'threshold': 2.0
+            },
+            'ENA': {
+                'name': 'Ethena',
+                'symbol': 'ENA',
+                'coingecko_id': 'ethena',
+                'binance_symbol': 'ENAUSDT',
+                'emoji': '🟢',
+                'threshold': 3.0  # Higher threshold for newer/volatile coins
+            },
+            'ETH': {
+                'name': 'Ethereum',
+                'symbol': 'ETH',
+                'coingecko_id': 'ethereum',
+                'binance_symbol': 'ETHUSDT',
+                'emoji': '🔹',
+                'threshold': 1.5
+            }
+        }
+        
+        # Bot state - track each currency separately
+        self.last_prices = {}
         self.start_time = datetime.now()
         self.message_count = 0
+        self.price_alerts_sent = {symbol: 0 for symbol in self.currencies.keys()}
         
-        logger.info("Bot initialized successfully")
+        # Initialize last prices
+        for symbol in self.currencies.keys():
+            self.last_prices[symbol] = None
         
-    def get_btc_price(self):
-        """Get BTC price with multiple fallback APIs"""
-        # Try multiple data sources in order of preference
+        logger.info(f"Multi-currency bot initialized for: {', '.join(self.currencies.keys())}")
+        
+    def get_crypto_prices_bulk(self):
+        """Get prices for all cryptocurrencies in bulk"""
+        # Try multiple data sources for bulk price fetching
         sources = [
             {
-                'name': 'CoinGecko',
+                'name': 'CoinGecko Bulk',
                 'url': 'https://api.coingecko.com/api/v3/simple/price',
-                'params': {'ids': 'bitcoin', 'vs_currencies': 'usd'},
-                'parse': lambda data: float(data['bitcoin']['usd'])
+                'params': {
+                    'ids': ','.join([self.currencies[symbol]['coingecko_id'] for symbol in self.currencies.keys()]),
+                    'vs_currencies': 'usd'
+                },
+                'parse': self._parse_coingecko_bulk
             },
             {
-                'name': 'CoinCap',
-                'url': 'https://api.coincap.io/v2/assets/bitcoin',
-                'params': {},
-                'parse': lambda data: float(data['data']['priceUsd'])
-            },
-            {
-                'name': 'CryptoCompare',
-                'url': 'https://min-api.cryptocompare.com/data/price',
-                'params': {'fsym': 'BTC', 'tsyms': 'USD'},
-                'parse': lambda data: float(data['USD'])
-            },
-            {
-                'name': 'Binance (Original)',
-                'url': f"{self.binance_api_url}/ticker/price",
-                'params': {'symbol': 'BTCUSDT'},
-                'parse': lambda data: float(data['price'])
+                'name': 'CryptoCompare Bulk',
+                'url': 'https://min-api.cryptocompare.com/data/pricemulti',
+                'params': {
+                    'fsyms': ','.join(self.currencies.keys()),
+                    'tsyms': 'USD'
+                },
+                'parse': self._parse_cryptocompare_bulk
             }
         ]
         
         for source in sources:
             try:
                 logger.info(f"Trying {source['name']} API...")
-                
-                # Add headers to look more like a regular browser request
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'application/json',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                }
-                
-                response = requests.get(
-                    source['url'], 
-                    params=source['params'],
-                    headers=headers,
-                    timeout=10
-                )
-                response.raise_for_status()
-                
-                data = response.json()
-                price = source['parse'](data)
-                
-                logger.info(f"✓ BTC Price fetched from {source['name']}: ${price:,.2f}")
-                return price
-                
-            except Exception as e:
-                logger.warning(f"✗ {source['name']} failed: {e}")
-                continue
-        
-        logger.error("All price sources failed!")
-        return None
-    
-    def get_24h_stats(self):
-        """Get 24h statistics with multiple fallback APIs"""
-        # Try multiple sources for 24h stats
-        sources = [
-            {
-                'name': 'CoinGecko',
-                'url': 'https://api.coingecko.com/api/v3/coins/bitcoin',
-                'params': {'localization': 'false', 'tickers': 'false', 'market_data': 'true', 'community_data': 'false', 'developer_data': 'false'},
-                'parse': lambda data: {
-                    'price_change': data['market_data']['price_change_24h']['usd'] if isinstance(data['market_data']['price_change_24h'], dict) else data['market_data']['price_change_24h'],
-                    'price_change_percent': data['market_data']['price_change_percentage_24h'] if data['market_data']['price_change_percentage_24h'] else 0,
-                    'high': data['market_data']['high_24h']['usd'] if isinstance(data['market_data']['high_24h'], dict) else data['market_data']['high_24h'],
-                    'low': data['market_data']['low_24h']['usd'] if isinstance(data['market_data']['low_24h'], dict) else data['market_data']['low_24h'],
-                    'volume': data['market_data']['total_volume']['usd'] if isinstance(data['market_data']['total_volume'], dict) else data['market_data']['total_volume']
-                }
-            },
-            {
-                'name': 'CoinCap',
-                'url': 'https://api.coincap.io/v2/assets/bitcoin',
-                'params': {},
-                'parse': lambda data: {
-                    'price_change': float(data['data']['changePercent24Hr']) * float(data['data']['priceUsd']) / 100,
-                    'price_change_percent': float(data['data']['changePercent24Hr']),
-                    'high': float(data['data']['priceUsd']) * 1.02,  # Approximation
-                    'low': float(data['data']['priceUsd']) * 0.98,   # Approximation
-                    'volume': float(data['data']['volumeUsd24Hr'])
-                }
-            },
-            {
-                'name': 'CryptoCompare',
-                'url': 'https://min-api.cryptocompare.com/data/pricemultifull',
-                'params': {'fsyms': 'BTC', 'tsyms': 'USD'},
-                'parse': lambda data: {
-                    'price_change': float(data['RAW']['BTC']['USD']['CHANGE24HOUR']),
-                    'price_change_percent': float(data['RAW']['BTC']['USD']['CHANGEPCT24HOUR']),
-                    'high': float(data['RAW']['BTC']['USD']['HIGH24HOUR']),
-                    'low': float(data['RAW']['BTC']['USD']['LOW24HOUR']),
-                    'volume': float(data['RAW']['BTC']['USD']['VOLUME24HOUR'])
-                }
-            },
-            {
-                'name': 'Alternative API',
-                'url': 'https://api.coinbase.com/v2/exchange-rates',
-                'params': {'currency': 'BTC'},
-                'parse': lambda data: {
-                    'price_change': 0,  # This API doesn't provide 24h change
-                    'price_change_percent': 0,
-                    'high': float(data['data']['rates']['USD']),
-                    'low': float(data['data']['rates']['USD']),
-                    'volume': 0
-                }
-            }
-        ]
-        
-        for source in sources:
-            try:
-                logger.info(f"Trying {source['name']} for 24h stats...")
                 
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -191,17 +144,179 @@ class BinanceTelegramBot:
                 response.raise_for_status()
                 
                 data = response.json()
-                stats = source['parse'](data)
+                prices = source['parse'](data)
                 
-                logger.info(f"✓ 24h stats fetched from {source['name']}")
-                return stats
+                if prices:
+                    logger.info(f"✓ Bulk prices fetched from {source['name']}")
+                    for symbol, price in prices.items():
+                        if price:
+                            logger.info(f"  {symbol}: ${price:,.4f}")
+                    return prices
                 
             except Exception as e:
-                logger.warning(f"✗ {source['name']} 24h stats failed: {e}")
+                logger.warning(f"✗ {source['name']} failed: {e}")
                 continue
         
-        logger.error("All 24h stats sources failed!")
-        # Return fallback stats if all sources fail
+        # Fallback to individual API calls
+        logger.info("Falling back to individual API calls...")
+        return asyncio.run(self._get_individual_prices())
+    
+    def _parse_coingecko_bulk(self, data):
+        """Parse CoinGecko bulk price response"""
+        prices = {}
+        try:
+            for symbol, config in self.currencies.items():
+                coingecko_id = config['coingecko_id']
+                if coingecko_id in data and 'usd' in data[coingecko_id]:
+                    prices[symbol] = float(data[coingecko_id]['usd'])
+        except Exception as e:
+            logger.error(f"Error parsing CoinGecko bulk data: {e}")
+        return prices
+    
+    def _parse_cryptocompare_bulk(self, data):
+        """Parse CryptoCompare bulk price response"""
+        prices = {}
+        try:
+            for symbol in self.currencies.keys():
+                if symbol in data and 'USD' in data[symbol]:
+                    prices[symbol] = float(data[symbol]['USD'])
+        except Exception as e:
+            logger.error(f"Error parsing CryptoCompare bulk data: {e}")
+        return prices
+    
+    async def _get_individual_prices(self):
+        """Fallback method to get prices individually"""
+        prices = {}
+        
+        for symbol, config in self.currencies.items():
+            try:
+                # Try CoinGecko individual API
+                url = 'https://api.coingecko.com/api/v3/simple/price'
+                params = {'ids': config['coingecko_id'], 'vs_currencies': 'usd'}
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                }
+                
+                response = requests.get(url, params=params, headers=headers, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                if config['coingecko_id'] in data and 'usd' in data[config['coingecko_id']]:
+                    prices[symbol] = float(data[config['coingecko_id']]['usd'])
+                    logger.info(f"✓ Individual price for {symbol}: ${prices[symbol]:,.4f}")
+                
+                # Small delay between requests to avoid rate limiting
+                await asyncio.sleep(0.2)
+                
+            except Exception as e:
+                logger.warning(f"✗ Individual price fetch failed for {symbol}: {e}")
+                prices[symbol] = None
+        
+        return prices
+    
+    def get_24h_stats_bulk(self):
+        """Get 24h statistics for all currencies"""
+        sources = [
+            {
+                'name': 'CoinGecko Bulk Stats',
+                'url': 'https://api.coingecko.com/api/v3/simple/price',
+                'params': {
+                    'ids': ','.join([self.currencies[symbol]['coingecko_id'] for symbol in self.currencies.keys()]),
+                    'vs_currencies': 'usd',
+                    'include_24hr_change': 'true',
+                    'include_24hr_vol': 'true'
+                },
+                'parse': self._parse_coingecko_stats_bulk
+            },
+            {
+                'name': 'CryptoCompare Full Stats',
+                'url': 'https://min-api.cryptocompare.com/data/pricemultifull',
+                'params': {
+                    'fsyms': ','.join(self.currencies.keys()),
+                    'tsyms': 'USD'
+                },
+                'parse': self._parse_cryptocompare_stats_bulk
+            }
+        ]
+        
+        for source in sources:
+            try:
+                logger.info(f"Trying {source['name']} for bulk 24h stats...")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                }
+                
+                response = requests.get(
+                    source['url'], 
+                    params=source['params'],
+                    headers=headers,
+                    timeout=15
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                stats = source['parse'](data)
+                
+                if stats:
+                    logger.info(f"✓ Bulk 24h stats fetched from {source['name']}")
+                    return stats
+                
+            except Exception as e:
+                logger.warning(f"✗ {source['name']} bulk stats failed: {e}")
+                continue
+        
+        # Return fallback stats
+        logger.error("All bulk stats sources failed!")
+        return {symbol: self._get_fallback_stats() for symbol in self.currencies.keys()}
+    
+    def _parse_coingecko_stats_bulk(self, data):
+        """Parse CoinGecko bulk stats response"""
+        stats = {}
+        try:
+            for symbol, config in self.currencies.items():
+                coingecko_id = config['coingecko_id']
+                if coingecko_id in data:
+                    coin_data = data[coingecko_id]
+                    current_price = float(coin_data.get('usd', 0))
+                    change_24h = float(coin_data.get('usd_24h_change', 0))
+                    volume_24h = float(coin_data.get('usd_24h_vol', 0))
+                    
+                    stats[symbol] = {
+                        'price_change': change_24h * current_price / 100 if change_24h != 0 else 0,
+                        'price_change_percent': change_24h,
+                        'high': current_price * 1.02,  # Approximation
+                        'low': current_price * 0.98,   # Approximation
+                        'volume': volume_24h
+                    }
+        except Exception as e:
+            logger.error(f"Error parsing CoinGecko bulk stats: {e}")
+        return stats
+    
+    def _parse_cryptocompare_stats_bulk(self, data):
+        """Parse CryptoCompare bulk stats response"""
+        stats = {}
+        try:
+            if 'RAW' in data:
+                for symbol in self.currencies.keys():
+                    if symbol in data['RAW'] and 'USD' in data['RAW'][symbol]:
+                        coin_data = data['RAW'][symbol]['USD']
+                        stats[symbol] = {
+                            'price_change': float(coin_data.get('CHANGE24HOUR', 0)),
+                            'price_change_percent': float(coin_data.get('CHANGEPCT24HOUR', 0)),
+                            'high': float(coin_data.get('HIGH24HOUR', 0)),
+                            'low': float(coin_data.get('LOW24HOUR', 0)),
+                            'volume': float(coin_data.get('VOLUME24HOUR', 0))
+                        }
+        except Exception as e:
+            logger.error(f"Error parsing CryptoCompare bulk stats: {e}")
+        return stats
+    
+    def _get_fallback_stats(self):
+        """Get fallback stats when all sources fail"""
         return {
             'price_change': 0,
             'price_change_percent': 0,
@@ -236,8 +351,9 @@ class BinanceTelegramBot:
             logger.error(f"Error sending Telegram message: {e}")
             return False
     
-    def format_price_message(self, price, stats, source_name="API"):
-        """Format price information for Telegram"""
+    def format_single_currency_message(self, symbol, price, stats):
+        """Format single currency alert message"""
+        config = self.currencies[symbol]
         change_emoji = "📈" if stats['price_change'] > 0 else "📉" if stats['price_change'] < 0 else "➖"
         
         # Handle cases where stats might be 0 or None
@@ -248,94 +364,149 @@ class BinanceTelegramBot:
         volume = stats.get('volume', 0)
         
         message = f"""
-🚀 <b>BTC Price Alert</b>
+🚨 <b>{config['emoji']} {config['name']} ({symbol}) Alert</b>
 
-💰 <b>Current Price:</b> ${price:,.2f}
-{change_emoji} <b>24h Change:</b> {price_change_percent:.2f}% (${price_change:+,.2f})
+💰 <b>Current Price:</b> ${price:,.4f}
+{change_emoji} <b>24h Change:</b> {price_change_percent:.2f}% (${price_change:+,.4f})
 
 📊 <b>24h Stats:</b>
-• <b>High:</b> ${high_price:,.2f}
-• <b>Low:</b> ${low_price:,.2f}
+• <b>High:</b> ${high_price:,.4f}
+• <b>Low:</b> ${low_price:,.4f}
 • <b>Volume:</b> ${volume:,.0f}
 
-📡 <b>Source:</b> {source_name}
 ⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
-
-🤖 <i>Bot uptime: {datetime.now() - self.start_time}</i>
         """.strip()
         
         return message
     
-    def should_send_alert(self, current_price):
-        """Determine if an alert should be sent"""
+    def format_multi_currency_summary(self, prices, stats):
+        """Format multi-currency summary message"""
+        message = f"""
+📊 <b>Multi-Currency Price Summary</b>
+
+"""
+        
+        for symbol, price in prices.items():
+            if price is None:
+                continue
+                
+            config = self.currencies[symbol]
+            symbol_stats = stats.get(symbol, self._get_fallback_stats())
+            change_emoji = "📈" if symbol_stats['price_change'] > 0 else "📉" if symbol_stats['price_change'] < 0 else "➖"
+            
+            price_change_percent = symbol_stats.get('price_change_percent', 0)
+            
+            message += f"""
+{config['emoji']} <b>{symbol}</b>: ${price:,.4f} {change_emoji} {price_change_percent:+.2f}%"""
+        
+        message += f"""
+
+
+⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
+🤖 <b>Bot uptime:</b> {datetime.now() - self.start_time}
+        """
+        
+        return message.strip()
+    
+    def should_send_individual_alert(self, symbol, current_price):
+        """Determine if an individual currency alert should be sent"""
+        config = self.currencies[symbol]
+        threshold = config['threshold']
+        
         # Send alert if:
         # 1. First time running
-        # 2. Price changed by more than 1%
-        # 3. Every 30 minutes regardless
+        # 2. Price changed by more than threshold%
         
-        if self.last_price is None:
-            return True, "Initial price check"
+        if self.last_prices[symbol] is None:
+            return True, f"Initial price check for {symbol}"
         
-        price_change_percent = abs((current_price - self.last_price) / self.last_price * 100)
+        price_change_percent = abs((current_price - self.last_prices[symbol]) / self.last_prices[symbol] * 100)
         
-        if price_change_percent >= 1.0:
-            return True, f"Price changed by {price_change_percent:.2f}%"
+        if price_change_percent >= threshold:
+            return True, f"{symbol} price changed by {price_change_percent:.2f}%"
         
-        # Send update every 30 minutes
-        if self.message_count == 0 or (self.message_count % 6 == 0):  # 6 * 5min = 30min
-            return True, "Periodic update"
+        return False, f"No significant change for {symbol}"
+    
+    def should_send_summary_alert(self):
+        """Determine if a summary alert should be sent"""
+        # Send summary every 30 minutes
+        if self.message_count % 6 == 0:  # 6 * 5min = 30min
+            return True, "Periodic summary update"
         
-        return False, "No significant change"
+        return False, "No summary needed"
     
     async def monitor_prices(self):
         """Main monitoring loop"""
-        source_used = "Unknown"
         try:
-            # Get current price
-            current_price = self.get_btc_price()
-            if current_price is None:
-                logger.warning("Failed to fetch price, skipping this cycle")
+            # Get current prices for all currencies
+            current_prices = self.get_crypto_prices_bulk()
+            if not current_prices:
+                logger.warning("Failed to fetch any prices, skipping this cycle")
                 return
             
-            # Get 24h statistics
-            stats = self.get_24h_stats()
+            # Get 24h statistics for all currencies
+            stats = self.get_24h_stats_bulk()
             
-            # Determine which source was used (for display purposes)
-            source_used = "Multi-Source API"
+            # Check for individual currency alerts
+            individual_alerts = []
+            for symbol, price in current_prices.items():
+                if price is None:
+                    continue
+                
+                should_alert, reason = self.should_send_individual_alert(symbol, price)
+                if should_alert:
+                    individual_alerts.append((symbol, price, reason))
             
-            # Check if we should send alert
-            should_alert, reason = self.should_send_alert(current_price)
-            
-            if should_alert:
-                logger.info(f"Sending alert: {reason}")
-                message = self.format_price_message(current_price, stats, source_used)
+            # Send individual alerts
+            for symbol, price, reason in individual_alerts:
+                logger.info(f"Sending individual alert for {symbol}: {reason}")
+                symbol_stats = stats.get(symbol, self._get_fallback_stats())
+                message = self.format_single_currency_message(symbol, price, symbol_stats)
                 await self.send_telegram_message(message)
-            else:
-                logger.info(f"No alert needed: {reason}")
+                self.price_alerts_sent[symbol] += 1
+                
+                # Small delay between messages
+                await asyncio.sleep(1)
             
-            # Update last price
-            self.last_price = current_price
+            # Check for summary alert
+            should_summary, summary_reason = self.should_send_summary_alert()
+            if should_summary and not individual_alerts:  # Only send summary if no individual alerts
+                logger.info(f"Sending summary alert: {summary_reason}")
+                message = self.format_multi_currency_summary(current_prices, stats)
+                await self.send_telegram_message(message)
+            
+            # Update last prices
+            for symbol, price in current_prices.items():
+                if price is not None:
+                    self.last_prices[symbol] = price
             
         except Exception as e:
             logger.error(f"Error in monitor_prices: {e}")
             # Send error notification
-            error_message = f"⚠️ <b>Bot Error</b>\n\n{str(e)}\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            error_message = f"⚠️ <b>Multi-Currency Bot Error</b>\n\n{str(e)}\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC"
             await self.send_telegram_message(error_message)
     
     async def run_bot(self):
         """Main bot loop"""
-        logger.info("Starting Binance Telegram Bot...")
+        logger.info("Starting Multi-Currency Telegram Bot...")
         
         # Send startup message
+        currency_list = '\n'.join([f"{config['emoji']} {config['name']} ({symbol})" for symbol, config in self.currencies.items()])
+        
         startup_message = f"""
-🚀 <b>Binance Bot Started!</b>
+🚀 <b>Multi-Currency Bot Started!</b>
 
-📊 Monitoring BTC/USDT price
-⏰ Check interval: 5 minutes
-🎯 Alert threshold: 1% price change
-📱 Periodic updates: Every 30 minutes
+📊 <b>Monitoring Cryptocurrencies:</b>
+{currency_list}
 
-🕒 Started at: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC
+⏰ <b>Check interval:</b> 5 minutes
+🎯 <b>Alert thresholds:</b>
+• BTC, ETH: 1-1.5% change
+• ARB, TRB: 2% change  
+• ENA: 3% change
+📱 <b>Summary updates:</b> Every 30 minutes
+
+🕒 <b>Started at:</b> {self.start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC
         """.strip()
         
         await self.send_telegram_message(startup_message)
@@ -364,12 +535,12 @@ def run_web_server():
 
 def run_bot():
     """Run the bot"""
-    bot = BinanceTelegramBot()
+    bot = MultiCurrencyTelegramBot()
     asyncio.run(bot.run_bot())
 
 if __name__ == "__main__":
     logger.info("="*50)
-    logger.info("BINANCE TELEGRAM BOT STARTING")
+    logger.info("MULTI-CURRENCY TELEGRAM BOT STARTING")
     logger.info("="*50)
     
     # Check environment variables
